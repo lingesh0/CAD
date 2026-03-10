@@ -1,0 +1,13 @@
+{
+    "venvPath": ".",
+    "venv": "venv",
+    "extraPaths": [
+        "."
+    ],
+    "include": [
+        "app",
+        "main.py",
+        "test_pipeline.py"
+    ],
+    "reportPrivateImportUsage": "none"
+}
