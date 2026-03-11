@@ -1,0 +1,23 @@
+{
+  "min_precision": 0.55,
+  "samples": [
+    {
+      "file": "../../files/FF.dxf",
+      "expected_labels": [
+        "hall",
+        "kitchen",
+        "bedroom",
+        "toilet"
+      ]
+    },
+    {
+      "file": "../../files/FTC- SHEET.dxf",
+      "expected_labels": [
+        "hall",
+        "kitchen",
+        "bedroom",
+        "toilet"
+      ]
+    }
+  ]
+}

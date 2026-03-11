@@ -10,6 +10,13 @@ ezdxf
 shapely
 networkx
 matplotlib
+scipy
 google-generativeai
+opencv-python-headless
+easyocr
+pytesseract
+cairosvg
+svgpathtools
+lxml
 pytest
 httpx

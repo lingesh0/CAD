@@ -1,0 +1,14 @@
+{
+  "hybrid_pipeline_validation": [
+    {
+      "file": "../files/FF.dxf",
+      "status": "failed",
+      "elapsed_sec": null,
+      "room_count": null,
+      "snapshot": null,
+      "adjacency_pairs": null,
+      "error": "GEOSException: bad allocation",
+      "traceback": "Traceback (most recent call last):\n  File \"<stdin>\", line 9, in <module>\n  File \"E:\\civil\\backend\\app\\pipeline\\pipeline.py\", line 483, in run_pipeline\n    return pipeline.run(file_path, floor_id=floor_id)\n           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"E:\\civil\\backend\\app\\pipeline\\pipeline.py\", line 190, in run\n    ).detect_rooms()\n      ~~~~~~~~~~~~^^\n  File \"E:\\civil\\backend\\app\\pipeline\\room_detector.py\", line 32, in detect_rooms\n    rooms = wall_graph.extract_polygons(\n        min_area_sqft=self.min_room_area_sqft,\n        area_to_sqft=self.area_to_sqft,\n        remove_outer=True,\n    )\n  File \"E:\\civil\\backend\\app\\pipeline\\wall_graph.py\", line 121, in extract_polygons\n    noded = unary_union(MultiLineString(lines))\n  File \"E:\\civil\\.venv\\Lib\\site-packages\\shapely\\ops.py\", line 117, in unary_union\n    return shapely.union_all(geoms, axis=None)\n           ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^\n  File \"E:\\civil\\.venv\\Lib\\site-packages\\shapely\\decorators.py\", line 173, in wrapper\n    result = func(*args, **kwargs)\n  File \"E:\\civil\\.venv\\Lib\\site-packages\\shapely\\decorators.py\", line 88, in wrapped\n    return func(*args, **kwargs)\n  File \"E:\\civil\\.venv\\Lib\\site-packages\\shapely\\set_operations.py\", line 553, in union_all\n    return lib.unary_union(collections, **kwargs)\n           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^\nshapely.errors.GEOSException: bad allocation\n"
+    }
+  ]
+}

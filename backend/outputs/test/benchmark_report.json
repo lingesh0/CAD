@@ -1,0 +1,33 @@
+{
+  "files_tested": 2,
+  "avg_total_sec": 15.9902,
+  "target_under_3s_ratio": 0.0,
+  "results": [
+    {
+      "file": "E:\\civil\\files\\FF.dxf",
+      "segments": 3744,
+      "doors": 0,
+      "blocks": 0,
+      "rooms": 8,
+      "extract_sec": 3.2772,
+      "detect_sec": 1.2072,
+      "total_sec": 4.4844,
+      "peak_tracemalloc_mb": 26.84,
+      "rss_delta_mb": 0.0,
+      "under_3s_target": false
+    },
+    {
+      "file": "E:\\civil\\files\\FTC- SHEET.dxf",
+      "segments": 7675,
+      "doors": 0,
+      "blocks": 0,
+      "rooms": 7,
+      "extract_sec": 24.9239,
+      "detect_sec": 2.5721,
+      "total_sec": 27.496,
+      "peak_tracemalloc_mb": 151.98,
+      "rss_delta_mb": 0.0,
+      "under_3s_target": false
+    }
+  ]
+}

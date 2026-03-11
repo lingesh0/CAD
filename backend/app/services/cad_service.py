@@ -3,11 +3,8 @@ import shutil
 import logging
 from sqlalchemy.orm import Session
 from app.database import models
-from app.cad_parser.extractor import DXFExtractor
 from app.cad_parser.converter import DWGConverter
-from app.geometry_engine.room_detector import RoomDetector
-from app.ai_processing.label_normalizer import LabelNormalizer
-from app.snapshot_generator.renderer import SnapshotGenerator
+from app.pipeline.pipeline import CADPipeline
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -16,8 +13,6 @@ class CADProcessingService:
     def __init__(self, db: Session):
         self.db = db
         self.converter = DWGConverter()
-        self.normalizer = LabelNormalizer()
-        self.snapshot_gen = SnapshotGenerator()
 
     def process_cad_file(self, cad_file_id: int):
         """
@@ -32,78 +27,91 @@ class CADProcessingService:
 
         try:
             input_path = cad_file.file_path
-            dxf_path = input_path
 
-            # 1. Convert DWG to DXF if necessary
-            if cad_file.original_format.lower() == "dwg":
-                logger.info(f"Converting DWG to DXF: {input_path}")
-                dxf_path = self.converter.convert_to_dxf(input_path, str(settings.output_dir))
-            
-            # 2. Extract Geometry
-            extractor = DXFExtractor(dxf_path)
-            geometry_data = extractor.extract_geometry()
-            
-            # 3. Create Floor Record (assume 1 floor per DXF for now)
+            # Run the new high-accuracy pipeline
+            pipeline = CADPipeline(
+                output_dir=str(settings.output_dir),
+                use_vision=True,
+            )
+            result = pipeline.run(input_path)
+
+            # ── Persist to database ──────────────────────────────────────
+            floor_data = result["floors"][0] if result.get("floors") else {}
+
             floor = models.Floor(cad_file_id=cad_file.id, floor_number=1)
             self.db.add(floor)
-            self.db.flush() # Get floor.id
-            
-            # 4. Save Walls (segments from new extractor)
-            walls_data = []
-            for seg in geometry_data.get("segments", []):
-                s, e = seg["start"], seg["end"]
-                wall = models.Wall(
-                    floor_id=floor.id,
-                    start_point=s,
-                    end_point=e,
-                    length=((s[0] - e[0])**2 + (s[1] - e[1])**2)**0.5,
-                )
-                self.db.add(wall)
-                walls_data.append({"start_point": s, "end_point": e})
+            self.db.flush()  # get floor.id
 
-            # 5. Room Detection
-            detector = RoomDetector(geometry_data)
-            detected_rooms = detector.detect_rooms()
-            
-            # 6. Normalize Labels
-            raw_labels = [r["original_label"] for r in detected_rooms if r.get("original_label")]
-            normalized_map = self.normalizer.normalize_labels(raw_labels)
-            
-            # 7. Save Rooms and Labels
-            final_rooms_for_snapshot = []
-            for room_data in detected_rooms:
-                orig_label = room_data.get("original_label")
-                norm_name = normalized_map.get(orig_label, room_data["name"])
-                
+            floor.snapshot_path = floor_data.get("snapshot")
+            floor.adjacency = floor_data.get("adjacency", [])
+
+            rooms_payload = []
+            room_snapshots = []
+            for idx, room_data in enumerate(floor_data.get("rooms", [])):
+                area_sqft = float(room_data.get("area_sqft", 0.0) or 0.0)
+                room_snapshot = room_data.get("snapshot")
+                room_snapshots.append(room_snapshot)
+
                 room = models.Room(
                     floor_id=floor.id,
-                    name=norm_name,
-                    original_label=orig_label,
-                    area=room_data.get("area_sqft", room_data.get("area", 0.0)),
-                    coordinates=room_data["coordinates"]
+                    name=room_data.get("name", f"Room {idx + 1}"),
+                    original_label=room_data.get("name"),
+                    area=area_sqft,
+                    coordinates=room_data.get("coordinates", []),
                 )
                 self.db.add(room)
-                final_rooms_for_snapshot.append({
-                    "name": norm_name,
-                    "area_sqft": room_data.get("area_sqft", room_data.get("area", 0.0)),
-                    "centroid": room_data.get("centroid"),
-                    "coordinates": room_data["coordinates"],
+                self.db.flush()
+
+                room.centroid        = room_data.get("centroid", [0.0, 0.0])
+                room.door_count      = int(room_data.get("doors", 0) or 0)
+                room.adjacency       = room_data.get("adjacent", [])
+                room.confidence      = float(room_data.get("confidence", 0.5) or 0.5)
+                room.furniture       = room_data.get("furniture", [])
+                room.snapshot_path   = room_snapshot
+                room.classification_method = room_data.get("classification_method", "rules")
+
+                rooms_payload.append({
+                    "room_id": idx + 1,
+                    "name":    room_data.get("name", f"Room {idx + 1}"),
+                    "area_sqft":  round(area_sqft, 2),
+                    "centroid":   room_data.get("centroid", [0.0, 0.0]),
+                    "doors":      int(room_data.get("doors", 0) or 0),
+                    "adjacency":  room_data.get("adjacent", []),
+                    "confidence": float(room_data.get("confidence", 0.5) or 0.5),
+                    "snapshot":   room_snapshot,
+                    "furniture":  room_data.get("furniture", []),
+                    "classification_method": room_data.get("classification_method", "rules"),
                 })
 
-            # 8. Generate Snapshot
-            snapshot_filename = self.snapshot_gen.generate_snapshot(
-                walls_data, final_rooms_for_snapshot, floor_id=floor.id
-            )
-            floor.snapshot_path = snapshot_filename
-            
+            floor.room_snapshots = room_snapshots
+
+            # Persist door records
+            for door in floor_data.get("doors", []):
+                drow = models.Door(
+                    floor_id=floor.id,
+                    position=door.get("center", [0.0, 0.0]),
+                    width=float(door.get("width_m", 0.0) or 0.0),
+                    source=door.get("source"),
+                    block_name=door.get("block_name"),
+                    connected_rooms=door.get("connected_rooms", []),
+                )
+                self.db.add(drow)
+
             cad_file.status = "completed"
             self.db.commit()
-            
+
             return {
-                "floor_id": floor.id,
+                "file": cad_file.filename,
                 "status": "completed",
-                "snapshot": snapshot_filename,
-                "room_count": len(detected_rooms)
+                "floors": [
+                    {
+                        "floor_id":  floor.id,
+                        "snapshot":  floor.snapshot_path,
+                        "doors":     floor_data.get("doors", []),
+                        "adjacency": floor.adjacency,
+                        "rooms":     rooms_payload,
+                    }
+                ],
             }
 
         except Exception as e:

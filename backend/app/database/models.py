@@ -22,12 +22,15 @@ class Floor(Base):
     cad_file_id = Column(Integer, ForeignKey("cad_files.id"), nullable=False)
     floor_number = Column(Integer, default=1)
     snapshot_path = Column(String, nullable=True)
+    room_snapshots = Column(JSON, nullable=True)
+    adjacency = Column(JSON, nullable=True)  # list[[room_i, room_j], ...]
     created_at = Column(DateTime, default=datetime.utcnow)
 
     cad_file = relationship("CADFile", back_populates="floors")
     rooms = relationship("Room", back_populates="floor", cascade="all, delete-orphan")
     walls = relationship("Wall", back_populates="floor", cascade="all, delete-orphan")
     labels = relationship("Label", back_populates="floor", cascade="all, delete-orphan")
+    doors = relationship("Door", back_populates="floor", cascade="all, delete-orphan")
 
 class Room(Base):
     __tablename__ = "rooms"
@@ -38,6 +41,13 @@ class Room(Base):
     original_label = Column(String, nullable=True) # Text from CAD
     area = Column(Float, nullable=True)
     coordinates = Column(JSON, nullable=False) # List of [x, y]
+    centroid = Column(JSON, nullable=True)  # [x, y]
+    door_count = Column(Integer, nullable=True, default=0)
+    adjacency = Column(JSON, nullable=True)  # list[int]
+    confidence = Column(Float, nullable=True)
+    furniture = Column(JSON, nullable=True)  # list[str]
+    snapshot_path = Column(String, nullable=True)
+    classification_method = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     floor = relationship("Floor", back_populates="rooms")
@@ -62,3 +72,17 @@ class Label(Base):
     position = Column(JSON, nullable=False) # [x, y]
     
     floor = relationship("Floor", back_populates="labels")
+
+
+class Door(Base):
+    __tablename__ = "doors"
+
+    id = Column(Integer, primary_key=True, index=True)
+    floor_id = Column(Integer, ForeignKey("floors.id"), nullable=False)
+    position = Column(JSON, nullable=False)  # [x, y]
+    width = Column(Float, nullable=True)
+    source = Column(String, nullable=True)
+    block_name = Column(String, nullable=True)
+    connected_rooms = Column(JSON, nullable=True)  # list[int]
+
+    floor = relationship("Floor", back_populates="doors")

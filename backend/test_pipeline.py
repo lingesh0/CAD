@@ -34,8 +34,9 @@ def test_file(dxf_path: str, output_dir: str, tag: str):
     segments = geometry["segments"]
     texts = geometry["texts"]
     doors = geometry.get("doors", [])
+    blocks = geometry.get("blocks", [])
     metadata = geometry.get("metadata", {})
-    print(f"      {len(segments)} wall segments, {len(texts)} text labels, {len(doors)} door arcs")
+    print(f"      {len(segments)} wall segments, {len(texts)} text labels, {len(doors)} doors, {len(blocks)} blocks")
 
     # 2. Detect rooms (wall graph -> cycles -> polygons -> merge) --------
     print("[2/7] Detecting rooms ...")
@@ -74,7 +75,7 @@ def test_file(dxf_path: str, output_dir: str, tag: str):
     print(f"      Snapshot saved -> {snap_path}")
 
     # 5. Vision AI — send snapshot + full room context -------------------
-    print("[5/7] Vision AI ...")
+    print("[5/7] Vision AI (low-confidence rooms only) ...")
     vision_labels = []
     rooms_context = [
         {
@@ -85,14 +86,18 @@ def test_file(dxf_path: str, output_dir: str, tag: str):
         }
         for r in rooms
     ]
-    try:
-        vision_labels = interpret_floor_plan(snap_path, rooms_context=rooms_context)
-        print(f"      Vision AI returned {len(vision_labels)} labels")
-        for vl in vision_labels:
-            idx = vl.get("room_index", "?")
-            print(f"        Room {idx}: {vl.get('room_type'):20s}  conf={vl.get('confidence')}")
-    except Exception as e:
-        print(f"      Vision AI skipped: {e}")
+    low_conf_rooms = [r for r in rooms if float(r.get("confidence", 0.0) or 0.0) < 0.75]
+    if low_conf_rooms:
+        try:
+            vision_labels = interpret_floor_plan(snap_path, rooms_context=rooms_context)
+            print(f"      Vision AI returned {len(vision_labels)} labels")
+            for vl in vision_labels:
+                idx = vl.get("room_index", "?")
+                print(f"        Room {idx}: {vl.get('room_type'):20s}  conf={vl.get('confidence')}")
+        except Exception as e:
+            print(f"      Vision AI skipped: {e}")
+    else:
+        print("      All rooms above confidence threshold; AI refinement skipped")
 
     # 6. Map Vision AI labels -> rooms -----------------------------------
     print("[6/7] Mapping labels ...")
@@ -133,6 +138,7 @@ def test_file(dxf_path: str, output_dir: str, tag: str):
         "total_segments": len(segments),
         "total_texts": len(texts),
         "total_doors": len(doors),
+        "total_blocks": len(blocks),
         "rooms": [
             {
                 "name": r["name"],
@@ -140,6 +146,8 @@ def test_file(dxf_path: str, output_dir: str, tag: str):
                 "centroid": [round(c, 2) for c in r.get("centroid", [0, 0])],
                 "original_label": r.get("original_label"),
                 "door_count": r.get("door_count", 0),
+                "adjacency": r.get("adjacent_rooms", []),
+                "furniture": r.get("furniture", []),
                 "confidence": r.get("confidence"),
                 "method": r.get("method", "geometry"),
             }

@@ -45,16 +45,17 @@ class DoorDetector:
             room_door_counts: dict mapping room index to door count
         """
         door_positions: list[list[float]] = []
+        door_objects: list[dict[str, Any]] = []
         for d in self.doors:
             door_positions.append(d["center"])
 
         adjacency: list[tuple[int, int]] = []
         door_counts: dict[int, int] = {i: 0 for i in range(len(self.rooms))}
 
-        for door in self.doors:
+        for door_idx, door in enumerate(self.doors):
             dp = Point(door["center"])
             # Expand search radius: door center + door radius (swing reach)
-            search_radius = self.snap_dist + door.get("radius", 0.0)
+            search_radius = self.snap_dist + float(door.get("radius", 0.0) or 0.0)
             touching: list[int] = []
 
             for ri, room in enumerate(self.rooms):
@@ -77,12 +78,22 @@ class DoorDetector:
                     if pair not in adjacency:
                         adjacency.append(pair)
 
+            door_objects.append({
+                "door_id": door_idx,
+                "position": list(door.get("center", [0.0, 0.0])),
+                "width": float(door.get("width", 0.0) or 0.0),
+                "source": door.get("source", "unknown"),
+                "block_name": door.get("block_name"),
+                "connected_rooms": touching,
+            })
+
         logger.info(
             "DoorDetector: %d doors → %d adjacencies across %d rooms",
             len(self.doors), len(adjacency), len(self.rooms),
         )
         return {
             "door_positions": door_positions,
+            "doors": door_objects,
             "room_adjacency": adjacency,
             "room_door_counts": door_counts,
         }

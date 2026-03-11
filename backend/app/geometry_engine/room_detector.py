@@ -26,6 +26,7 @@ from app.geometry_engine.wall_graph_builder import WallGraphBuilder
 from app.geometry_engine.polygon_detector import PolygonDetector
 from app.geometry_engine.door_detector import DoorDetector
 from app.geometry_engine.room_classifier import classify_rooms
+from app.geometry_engine.room_classifier import classify_room_contextual
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +46,10 @@ class RoomDetector:
         self.raw_segments = geometry_data.get("segments", [])
         self.texts = geometry_data.get("texts", [])
         self.doors_raw = geometry_data.get("doors", [])
+        self.blocks_raw = geometry_data.get("blocks", [])
         self.metadata = geometry_data.get("metadata", {})
-        self.allowed_layers = allowed_layers or [
+        inferred_layers = self.metadata.get("candidate_wall_layers") or []
+        self.allowed_layers = allowed_layers or inferred_layers or [
             "WALL", "A-WALL", "STRUCTURE", "OUTLINE", "0",
         ]
         self.min_room_area_sqft = min_room_area_sqft
@@ -107,7 +110,12 @@ class RoomDetector:
             candidates = merged
 
         # 6. Door detection
-        door_info: dict[str, Any] = {"door_positions": [], "room_adjacency": [], "room_door_counts": {}}
+        door_info: dict[str, Any] = {
+            "door_positions": [],
+            "doors": [],
+            "room_adjacency": [],
+            "room_door_counts": {},
+        }
         if self.doors_raw:
             door_detector = DoorDetector(
                 self.doors_raw, candidates, snap_dist=1.0,
@@ -122,13 +130,28 @@ class RoomDetector:
         if not has_any_label:
             rooms = classify_rooms(rooms, door_counts=door_info.get("room_door_counts"))
 
+        # 8a. Associate furniture blocks to room polygons
+        self._attach_blocks(rooms)
+
         # 9. Store door/adjacency metadata on rooms
         for idx, room in enumerate(rooms):
             room["door_count"] = door_info.get("room_door_counts", {}).get(idx, 0)
         self._adjacency = door_info.get("room_adjacency", [])
+        self._doors = door_info.get("doors", [])
+
+        # 10. Contextual classification using rules + adjacency + furniture.
+        self._classify_with_context(rooms)
 
         logger.info("Detected %d rooms", len(rooms))
         return rooms
+
+    @property
+    def adjacency(self) -> list[tuple[int, int]]:
+        return getattr(self, "_adjacency", [])
+
+    @property
+    def doors(self) -> list[dict]:
+        return getattr(self, "_doors", [])
 
     # ------------------------------------------------------------------
     def _associate_labels(self, candidates: list[dict]) -> list[dict]:
@@ -189,3 +212,66 @@ class RoomDetector:
             })
 
         return rooms
+
+    def _attach_blocks(self, rooms: list[dict]) -> None:
+        """Attach block/furniture detections to containing rooms."""
+        if not self.blocks_raw:
+            for room in rooms:
+                room["blocks"] = []
+                room["furniture"] = []
+            return
+
+        for room in rooms:
+            room["blocks"] = []
+            room["furniture"] = []
+
+        for block in self.blocks_raw:
+            bpos = block.get("position")
+            if not bpos or len(bpos) < 2:
+                continue
+            pt = Point(bpos[0], bpos[1])
+            for room in rooms:
+                poly = room.get("polygon")
+                if poly is None:
+                    continue
+                if poly.contains(pt):
+                    room["blocks"].append(block)
+                    btype = block.get("type")
+                    if btype and btype != "GENERIC":
+                        room["furniture"].append(btype)
+                    break
+
+    def _classify_with_context(self, rooms: list[dict]) -> None:
+        """Run deterministic contextual classification and attach confidence."""
+        adjacency_map: dict[int, set[int]] = {i: set() for i in range(len(rooms))}
+        for a, b in self._adjacency:
+            adjacency_map.setdefault(a, set()).add(b)
+            adjacency_map.setdefault(b, set()).add(a)
+
+        current_labels = [str(r.get("name", "")) for r in rooms]
+        for idx, room in enumerate(rooms):
+            poly = room.get("polygon")
+            if poly is None:
+                room["confidence"] = 0.5
+                room["classification_method"] = "fallback"
+                continue
+
+            neighbor_labels = [
+                current_labels[n] for n in sorted(adjacency_map.get(idx, set()))
+                if 0 <= n < len(current_labels)
+            ]
+            result = classify_room_contextual(
+                area_sqft=float(room.get("area_sqft", 0.0) or 0.0),
+                polygon=poly,
+                door_count=int(room.get("door_count", 0) or 0),
+                furniture_types=room.get("furniture", []),
+                adjacent_labels=neighbor_labels,
+                text_label=room.get("original_label"),
+                vision_label=room.get("vision_label"),
+                vision_confidence=float(room.get("vision_confidence", 0.0) or 0.0),
+            )
+            room["name"] = result["label"]
+            room["confidence"] = result["confidence"]
+            room["classification_method"] = result["method"]
+            room["needs_ai_refine"] = result.get("needs_ai", False)
+            room["adjacent_rooms"] = sorted(adjacency_map.get(idx, set()))

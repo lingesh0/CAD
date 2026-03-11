@@ -130,6 +130,98 @@ def classify_rooms(
     return rooms
 
 
+def classify_room_contextual(
+    *,
+    area_sqft: float,
+    polygon: Polygon,
+    door_count: int,
+    furniture_types: list[str] | None,
+    adjacent_labels: list[str] | None,
+    text_label: str | None,
+    vision_label: str | None,
+    vision_confidence: float,
+) -> dict:
+    """Return final label/confidence from fused deterministic + AI signals.
+
+    This classifier is intentionally deterministic-first for production stability.
+    AI labels are only trusted when deterministic confidence is low.
+    """
+    furniture = {str(t).upper() for t in (furniture_types or []) if t}
+    neighbors = {str(t).upper() for t in (adjacent_labels or []) if t}
+
+    # 1) Trust CAD text labels most
+    if text_label:
+        return {
+            "label": text_label,
+            "confidence": 0.95,
+            "method": "text",
+            "needs_ai": False,
+        }
+
+    # 2) Deterministic rules from furniture/area/layout
+    aspect = _min_rect_aspect(polygon)
+    rule_label = classify_room(polygon, area_sqft, door_count)
+    confidence = 0.62
+    method = "rules"
+
+    if "STOVE" in furniture:
+        rule_label = "Kitchen"
+        confidence = 0.93
+        method = "rules+furniture"
+    elif "BED" in furniture:
+        rule_label = "Bedroom"
+        confidence = 0.92
+        method = "rules+furniture"
+    elif "WC" in furniture or "SINK" in furniture:
+        if area_sqft < 60:
+            rule_label = "Toilet"
+        else:
+            rule_label = "Bathroom"
+        confidence = 0.91
+        method = "rules+furniture"
+    elif "SOFA" in furniture or "DINING" in furniture:
+        if area_sqft > 140:
+            rule_label = "Hall"
+            confidence = 0.83
+        else:
+            rule_label = "Living Room"
+            confidence = 0.8
+        method = "rules+furniture"
+    elif area_sqft < 35:
+        rule_label = "Toilet"
+        confidence = 0.76
+        method = "rules+area"
+    elif area_sqft > 200 and door_count >= 2 and aspect < 3.0:
+        rule_label = "Hall"
+        confidence = 0.8
+        method = "rules+area"
+
+    # 3) Adjacency refinement
+    if rule_label == "Kitchen" and "HALL" in neighbors:
+        confidence = min(0.95, confidence + 0.03)
+    if rule_label in {"Toilet", "Bathroom"} and (
+        "BEDROOM" in neighbors or "HALL" in neighbors
+    ):
+        confidence = min(0.93, confidence + 0.03)
+
+    # 4) AI refinement only when deterministic confidence is low
+    needs_ai = confidence < 0.75
+    if needs_ai and vision_label and vision_confidence >= 0.72:
+        return {
+            "label": vision_label,
+            "confidence": round(min(0.9, float(vision_confidence)), 2),
+            "method": "vision-refine",
+            "needs_ai": False,
+        }
+
+    return {
+        "label": rule_label,
+        "confidence": round(confidence, 2),
+        "method": method,
+        "needs_ai": needs_ai,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Multi-signal scoring
 # ---------------------------------------------------------------------------

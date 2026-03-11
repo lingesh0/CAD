@@ -68,14 +68,35 @@ async def get_floor_data(floor_id: int, db: Session = Depends(get_db)):
         "floor_id": floor.id,
         "cad_file_id": floor.cad_file_id,
         "floor_number": floor.floor_number,
+        "snapshot": floor.snapshot_path,
+        "room_snapshots": floor.room_snapshots or [],
+        "adjacency": floor.adjacency or [],
         "rooms": [
             {
                 "id": room.id,
                 "name": room.name,
                 "area": room.area,
-                "coordinates": room.coordinates
+                "coordinates": room.coordinates,
+                "centroid": room.centroid,
+                "doors": room.door_count,
+                "adjacency": room.adjacency or [],
+                "confidence": room.confidence,
+                "furniture": room.furniture or [],
+                "snapshot": room.snapshot_path,
+                "classification_method": room.classification_method,
             } for room in floor.rooms
-        ]
+        ],
+        "doors": [
+            {
+                "id": d.id,
+                "position": d.position,
+                "width": d.width,
+                "source": d.source,
+                "block_name": d.block_name,
+                "connected_rooms": d.connected_rooms or [],
+            }
+            for d in floor.doors
+        ],
     }
 
 @router.get("/snapshot/{floor_id}")
@@ -86,8 +107,10 @@ async def get_snapshot(floor_id: int, db: Session = Depends(get_db)):
     floor = db.query(models.Floor).filter(models.Floor.id == floor_id).first()
     if not floor or not floor.snapshot_path:
         raise HTTPException(status_code=404, detail="Snapshot not found")
-        
-    snapshot_path = os.path.join(settings.snapshot_dir, floor.snapshot_path)
+
+    snapshot_path = floor.snapshot_path
+    if not os.path.isabs(snapshot_path):
+        snapshot_path = os.path.join(settings.snapshot_dir, snapshot_path)
     if not os.path.exists(snapshot_path):
          raise HTTPException(status_code=404, detail="Snapshot file missing")
          
@@ -107,6 +130,33 @@ async def get_rooms(floor_id: int, db: Session = Depends(get_db)):
             "id": room.id,
             "name": room.name,
             "area": room.area,
-            "coordinates": room.coordinates
+            "coordinates": room.coordinates,
+            "centroid": room.centroid,
+            "doors": room.door_count,
+            "adjacency": room.adjacency or [],
+            "confidence": room.confidence,
+            "furniture": room.furniture or [],
+            "snapshot": room.snapshot_path,
+            "classification_method": room.classification_method,
         } for room in rooms
+    ]
+
+
+@router.get("/doors/{floor_id}")
+async def get_doors(floor_id: int, db: Session = Depends(get_db)):
+    """Return detected doors and connectivity for a floor."""
+    doors = db.query(models.Door).filter(models.Door.floor_id == floor_id).all()
+    if not doors:
+        raise HTTPException(status_code=404, detail="Doors not found")
+
+    return [
+        {
+            "id": d.id,
+            "position": d.position,
+            "width": d.width,
+            "source": d.source,
+            "block_name": d.block_name,
+            "connected_rooms": d.connected_rooms or [],
+        }
+        for d in doors
     ]

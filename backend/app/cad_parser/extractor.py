@@ -10,6 +10,16 @@ logger = logging.getLogger(__name__)
 
 # Keywords that indicate a door-related block name.
 _DOOR_BLOCK_KEYWORDS = {"DOOR", "DR", "SWING", "ENTRY", "GATE"}
+_FURNITURE_KEYWORDS = {
+    "BED": "BED",
+    "SOFA": "SOFA",
+    "DINING": "DINING",
+    "DINE": "DINING",
+    "STOVE": "STOVE",
+    "WC": "WC",
+    "TOILET": "WC",
+    "SINK": "SINK",
+}
 
 
 class DXFExtractor:
@@ -26,6 +36,7 @@ class DXFExtractor:
     # ARCs whose sweep angle (°) is in this range are candidate door swings.
     _DOOR_ARC_MIN_ANGLE = 70.0
     _DOOR_ARC_MAX_ANGLE = 100.0
+    _ARC_SEGMENTS = 12
 
     def __init__(self, file_path: str):
         self.file_path = file_path
@@ -60,7 +71,9 @@ class DXFExtractor:
             "segments": [],  # [{start:[x,y], end:[x,y], layer:str}, ...]
             "texts": [],     # [{text:str, position:[x,y], layer:str}, ...]
             "doors": [],     # [{center:[x,y], radius:float, layer:str}, ...]
+            "blocks": [],    # [{name,type,position,layer,...}, ...]
         }
+        layer_counts: dict[str, int] = {}
         metadata = {
             "insunits": insunits,
             "linear_to_feet": linear_to_feet,
@@ -68,11 +81,21 @@ class DXFExtractor:
         }
         self._visited_blocks.clear()
         self._seen_text_keys: set[tuple] = set()  # dedup (text, rx, ry)
-        self._process_layout(self.msp, geometry, offset_x=0.0, offset_y=0.0, is_block_def=False)
+        self._process_layout(
+            self.msp,
+            geometry,
+            offset_x=0.0,
+            offset_y=0.0,
+            is_block_def=False,
+            layer_counts=layer_counts,
+        )
+        candidate_wall_layers = self._infer_wall_layers(layer_counts)
+        metadata["layer_counts"] = layer_counts
+        metadata["candidate_wall_layers"] = candidate_wall_layers
         logger.info(
-            "Extracted %d segments, %d texts, %d doors from %s (INSUNITS=%d)",
+            "Extracted %d segments, %d texts, %d doors, %d blocks from %s (INSUNITS=%d)",
             len(geometry["segments"]), len(geometry["texts"]),
-            len(geometry["doors"]), self.file_path, insunits,
+            len(geometry["doors"]), len(geometry["blocks"]), self.file_path, insunits,
         )
         geometry["metadata"] = metadata
         return geometry
@@ -85,19 +108,59 @@ class DXFExtractor:
         self._seen_text_keys.add(key)
         geometry["texts"].append({"text": text, "position": [x, y], "layer": layer})
 
+    @staticmethod
+    def _normalize_layer(layer: str) -> str:
+        return (layer or "0").upper().strip()
+
+    @staticmethod
+    def _infer_wall_layers(layer_counts: dict[str, int]) -> list[str]:
+        preferred = []
+        for layer in layer_counts:
+            ul = layer.upper()
+            if any(k in ul for k in ["WALL", "A-WALL", "STRUCT", "CORE", "ARCH", "OUTLINE"]):
+                preferred.append(layer)
+        if preferred:
+            return sorted(preferred)
+        ordered = sorted(layer_counts.items(), key=lambda kv: kv[1], reverse=True)
+        return [name for name, _ in ordered[:5]]
+
+    @staticmethod
+    def _arc_points(
+        cx: float,
+        cy: float,
+        radius: float,
+        start_deg: float,
+        end_deg: float,
+        segments: int,
+    ) -> list[tuple[float, float]]:
+        sweep = (end_deg - start_deg) % 360.0
+        if sweep == 0.0:
+            sweep = 360.0
+        n = max(3, int(segments * (sweep / 90.0)))
+        pts: list[tuple[float, float]] = []
+        for i in range(n + 1):
+            a = math.radians(start_deg + (sweep * i / n))
+            pts.append((cx + radius * math.cos(a), cy + radius * math.sin(a)))
+        return pts
+
     # ------------------------------------------------------------------
     def _process_layout(
         self, layout: Any, geometry: dict, *,
         offset_x: float, offset_y: float,
         is_block_def: bool = False,
+        layer_counts: dict[str, int] | None = None,
     ) -> None:
         # --- LINE entities ---
         for entity in layout.query("LINE"):
             try:
+                layer_name = entity.dxf.layer
+                if layer_counts is not None:
+                    ln = self._normalize_layer(layer_name)
+                    layer_counts[ln] = layer_counts.get(ln, 0) + 1
                 geometry["segments"].append({
                     "start": [entity.dxf.start.x + offset_x, entity.dxf.start.y + offset_y],
                     "end":   [entity.dxf.end.x + offset_x,   entity.dxf.end.y + offset_y],
-                    "layer": entity.dxf.layer,
+                    "layer": layer_name,
                 })
             except Exception:
                 pass
@@ -111,6 +174,10 @@ class DXFExtractor:
                 else:
                     pts = [(p.x + offset_x, p.y + offset_y) for p in entity.points()]
                     is_closed = entity.is_closed
+                layer_name = entity.dxf.layer
+                if layer_counts is not None:
+                    ln = self._normalize_layer(layer_name)
+                    layer_counts[ln] = layer_counts.get(ln, 0) + 1
                 if len(pts) < 2:
                     continue
 
@@ -134,13 +201,13 @@ class DXFExtractor:
                     geometry["segments"].append({
                         "start": list(pts[i]),
                         "end":   list(pts[i + 1]),
-                        "layer": entity.dxf.layer,
+                        "layer": layer_name,
                     })
                 if is_closed and len(pts) >= 3 and pts[0] != pts[-1]:
                     geometry["segments"].append({
                         "start": list(pts[-1]),
                         "end":   list(pts[0]),
-                        "layer": entity.dxf.layer,
+                        "layer": layer_name,
                     })
             except Exception as e:
                 logger.debug("Failed to extract polyline: %s", e)
@@ -154,6 +221,21 @@ class DXFExtractor:
                 start_angle = entity.dxf.start_angle
                 end_angle = entity.dxf.end_angle
                 sweep = (end_angle - start_angle) % 360.0
+                layer_name = entity.dxf.layer
+                if layer_counts is not None:
+                    ln = self._normalize_layer(layer_name)
+                    layer_counts[ln] = layer_counts.get(ln, 0) + 1
+
+                arc_pts = self._arc_points(
+                    cx, cy, r, start_angle, end_angle, self._ARC_SEGMENTS,
+                )
+                for i in range(len(arc_pts) - 1):
+                    geometry["segments"].append({
+                        "start": [arc_pts[i][0], arc_pts[i][1]],
+                        "end": [arc_pts[i + 1][0], arc_pts[i + 1][1]],
+                        "layer": layer_name,
+                    })
+
                 if self._DOOR_ARC_MIN_ANGLE <= sweep <= self._DOOR_ARC_MAX_ANGLE:
                     geometry["doors"].append({
                         "center": [cx, cy],
@@ -161,7 +243,10 @@ class DXFExtractor:
                         "start_angle": start_angle,
                         "end_angle": end_angle,
                         "sweep": sweep,
-                        "layer": entity.dxf.layer,
+                        "layer": layer_name,
+                        "source": "arc",
+                        "width": round(max(0.0, 2.0 * r), 4),
+                        "position": [cx, cy],
                     })
             except Exception as e:
                 logger.debug("Failed to extract arc: %s", e)
@@ -170,7 +255,25 @@ class DXFExtractor:
         for entity in layout.query("CIRCLE"):
             try:
                 r = entity.dxf.radius
-                layer = entity.dxf.layer.upper()
+                layer_name = entity.dxf.layer
+                layer = layer_name.upper()
+                if layer_counts is not None:
+                    ln = self._normalize_layer(layer_name)
+                    layer_counts[ln] = layer_counts.get(ln, 0) + 1
+                cpts = self._arc_points(
+                    entity.dxf.center.x + offset_x,
+                    entity.dxf.center.y + offset_y,
+                    r,
+                    0.0,
+                    360.0,
+                    max(16, self._ARC_SEGMENTS * 2),
+                )
+                for i in range(len(cpts) - 1):
+                    geometry["segments"].append({
+                        "start": [cpts[i][0], cpts[i][1]],
+                        "end": [cpts[i + 1][0], cpts[i + 1][1]],
+                        "layer": layer_name,
+                    })
                 if any(kw in layer for kw in _DOOR_BLOCK_KEYWORDS):
                     cx = entity.dxf.center.x + offset_x
                     cy = entity.dxf.center.y + offset_y
@@ -180,7 +283,10 @@ class DXFExtractor:
                         "start_angle": 0.0,
                         "end_angle": 360.0,
                         "sweep": 360.0,
-                        "layer": entity.dxf.layer,
+                        "layer": layer_name,
+                        "source": "circle",
+                        "width": round(max(0.0, 2.0 * r), 4),
+                        "position": [cx, cy],
                     })
             except Exception as e:
                 logger.debug("Failed to extract circle: %s", e)
@@ -188,6 +294,9 @@ class DXFExtractor:
         # --- TEXT / MTEXT ---
         for entity in layout.query("TEXT MTEXT"):
             try:
+                if layer_counts is not None:
+                    ln = self._normalize_layer(entity.dxf.layer)
+                    layer_counts[ln] = layer_counts.get(ln, 0) + 1
                 if entity.dxftype() == "MTEXT":
                     raw = entity.text
                 else:
@@ -208,6 +317,9 @@ class DXFExtractor:
         entity_types = "ATTRIB" if is_block_def else "ATTRIB ATTDEF"
         for entity in layout.query(entity_types):
             try:
+                if layer_counts is not None:
+                    ln = self._normalize_layer(entity.dxf.layer)
+                    layer_counts[ln] = layer_counts.get(ln, 0) + 1
                 txt = ezdxf.tools.text.plain_text(entity.dxf.text).strip()
                 pos = entity.dxf.insert
                 if txt:
@@ -224,9 +336,29 @@ class DXFExtractor:
             try:
                 block_name = entity.dxf.name
                 ins = entity.dxf.insert
+                layer_name = entity.dxf.layer
+                upper_name = block_name.upper()
+                if layer_counts is not None:
+                    ln = self._normalize_layer(layer_name)
+                    layer_counts[ln] = layer_counts.get(ln, 0) + 1
+
+                block_type = None
+                for kw, btype in _FURNITURE_KEYWORDS.items():
+                    if kw in upper_name:
+                        block_type = btype
+                        break
+
+                geometry["blocks"].append({
+                    "name": block_name,
+                    "type": block_type or "GENERIC",
+                    "position": [ins.x + offset_x, ins.y + offset_y],
+                    "layer": layer_name,
+                    "rotation": float(getattr(entity.dxf, "rotation", 0.0) or 0.0),
+                    "xscale": float(getattr(entity.dxf, "xscale", 1.0) or 1.0),
+                    "yscale": float(getattr(entity.dxf, "yscale", 1.0) or 1.0),
+                })
 
                 # Detect door blocks by block name heuristic
-                upper_name = block_name.upper()
                 if any(kw in upper_name for kw in _DOOR_BLOCK_KEYWORDS):
                     geometry["doors"].append({
                         "center": [ins.x + offset_x, ins.y + offset_y],
@@ -234,8 +366,11 @@ class DXFExtractor:
                         "start_angle": 0.0,
                         "end_angle": 90.0,
                         "sweep": 90.0,
-                        "layer": entity.dxf.layer,
+                        "layer": layer_name,
                         "block_name": block_name,
+                        "source": "insert",
+                        "width": round(abs(float(getattr(entity.dxf, "xscale", 1.0) or 1.0)), 4),
+                        "position": [ins.x + offset_x, ins.y + offset_y],
                     })
 
                 # Extract ATTRIB values directly from the INSERT reference.
@@ -253,6 +388,9 @@ class DXFExtractor:
                                 ax, ay = apos.x + offset_x, apos.y + offset_y
                             except Exception:
                                 ax, ay = ins.x + offset_x, ins.y + offset_y
+                            if layer_counts is not None:
+                                ln = self._normalize_layer(attrib.dxf.layer)
+                                layer_counts[ln] = layer_counts.get(ln, 0) + 1
                             self._add_text(geometry, txt, ax, ay, attrib.dxf.layer)
                         except Exception:
                             pass
@@ -268,6 +406,7 @@ class DXFExtractor:
                         offset_x=offset_x + ins.x,
                         offset_y=offset_y + ins.y,
                         is_block_def=True,
+                        layer_counts=layer_counts,
                     )
                 self._visited_blocks.discard(block_name)
             except Exception as e:
