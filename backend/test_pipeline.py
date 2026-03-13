@@ -159,19 +159,26 @@ def test_file(dxf_path: str, output_dir: str, tag: str):
     print(json.dumps(result_json, indent=2))
     return result_json
 
+from pathlib import Path
+import os
 
 def main():
-    output_dir = r"e:\civil\backend\outputs\test"
+
+    base_dir = Path(__file__).resolve().parent.parent
+
+    input_dir = base_dir / "data" / "input"
+    output_dir = base_dir / "data" / "output"
+
     os.makedirs(output_dir, exist_ok=True)
 
     files = [
-        (r"e:\civil\files\FF.dxf", "ff"),
-        (r"e:\civil\files\FTC- SHEET.dxf", "ftc"),
+        (input_dir / "FF.dxf", "ff"),
+        (input_dir / "FTC-SHEET.dxf", "ftc"),
     ]
 
     for dxf_path, tag in files:
-        if os.path.exists(dxf_path):
-            test_file(dxf_path, output_dir, tag)
+        if dxf_path.exists():
+            test_file(str(dxf_path), str(output_dir), tag)
         else:
             print(f"SKIP: {dxf_path} not found")
 
